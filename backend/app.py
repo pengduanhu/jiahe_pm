@@ -19,6 +19,15 @@ FRONTEND_DIR = ROOT / "frontend"
 DB_PATH = Path(__file__).resolve().parent / "project_management.db"
 HOST = "127.0.0.1"
 PORT = int(os.environ.get("PORT", "8765"))
+DEFAULT_ROLE_PERMISSIONS = {
+    "管理员": ["requirements", "plans", "cases", "users", "roles"],
+    "业务方": ["requirements"],
+    "产品经理": ["requirements", "plans"],
+    "开发（web端）": ["requirements", "cases"],
+    "开发（移动端）": ["requirements", "cases"],
+    "开发（后端）": ["requirements", "cases"],
+    "测试": ["plans", "cases"],
+}
 
 
 def now_iso() -> str:
@@ -114,6 +123,7 @@ def init_db() -> None:
                 id TEXT PRIMARY KEY,
                 name TEXT NOT NULL UNIQUE,
                 description TEXT NOT NULL DEFAULT '',
+                permissions TEXT NOT NULL DEFAULT '[]',
                 status TEXT NOT NULL DEFAULT '启用',
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
@@ -128,6 +138,7 @@ def init_db() -> None:
             """
         )
         ensure_user_auth_columns(conn)
+        ensure_role_permission_column(conn)
 
         existing = conn.execute("SELECT COUNT(*) AS count FROM requirements").fetchone()["count"]
         if existing == 0:
@@ -141,6 +152,7 @@ def init_db() -> None:
         if existing_users == 0:
             seed_users(conn)
         normalize_user_roles(conn)
+        seed_role_permissions(conn)
         seed_default_admin_password(conn)
 
 
@@ -150,6 +162,12 @@ def ensure_user_auth_columns(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE users ADD COLUMN password_salt TEXT")
     if "password_hash" not in columns:
         conn.execute("ALTER TABLE users ADD COLUMN password_hash TEXT")
+
+
+def ensure_role_permission_column(conn: sqlite3.Connection) -> None:
+    columns = {row["name"] for row in conn.execute("PRAGMA table_info(roles)").fetchall()}
+    if "permissions" not in columns:
+        conn.execute("ALTER TABLE roles ADD COLUMN permissions TEXT NOT NULL DEFAULT '[]'")
 
 
 def seed_data(conn: sqlite3.Connection) -> None:
@@ -272,10 +290,18 @@ def seed_roles(conn: sqlite3.Connection) -> None:
         conn.execute(
             """
             INSERT INTO roles
-            (id, name, description, status, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?)
+            (id, name, description, permissions, status, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
             """,
-            (new_id("ROLE"), name, description, status, created, created),
+            (new_id("ROLE"), name, description, json.dumps(DEFAULT_ROLE_PERMISSIONS.get(name, []), ensure_ascii=False), status, created, created),
+        )
+
+
+def seed_role_permissions(conn: sqlite3.Connection) -> None:
+    for name, permissions in DEFAULT_ROLE_PERMISSIONS.items():
+        conn.execute(
+            "UPDATE roles SET permissions = ? WHERE name = ? AND (permissions IS NULL OR permissions = '' OR permissions = '[]')",
+            (json.dumps(permissions, ensure_ascii=False), name),
         )
 
 
@@ -418,10 +444,12 @@ class AppHandler(BaseHTTPRequestHandler):
             elif table == "users":
                 rows = conn.execute(
                     """
-                    SELECT id, name, email, role, department, phone, status, last_login, created_at, updated_at
-                    FROM users
-                    WHERE (? = '' OR name LIKE ? OR email LIKE ? OR role LIKE ? OR department LIKE ? OR status LIKE ?)
-                    ORDER BY updated_at DESC
+                    SELECT u.id, u.name, u.email, u.role, u.phone, u.status, u.last_login,
+                           u.created_at, u.updated_at, r.permissions AS role_permissions
+                    FROM users u
+                    LEFT JOIN roles r ON r.name = u.role
+                    WHERE (? = '' OR u.name LIKE ? OR u.email LIKE ? OR u.role LIKE ? OR u.phone LIKE ? OR u.status LIKE ?)
+                    ORDER BY u.updated_at DESC
                     """,
                     (search, f"%{search}%", f"%{search}%", f"%{search}%", f"%{search}%", f"%{search}%"),
                 ).fetchall()
@@ -560,9 +588,10 @@ class AppHandler(BaseHTTPRequestHandler):
         with connect() as conn:
             user = conn.execute(
                 """
-                SELECT u.*
+                SELECT u.*, r.permissions AS role_permissions
                 FROM auth_sessions s
                 JOIN users u ON u.id = s.user_id
+                LEFT JOIN roles r ON r.name = u.role
                 WHERE s.token = ? AND u.status = '启用'
                 """,
                 (token,),
@@ -640,8 +669,7 @@ class AppHandler(BaseHTTPRequestHandler):
                 "id": record_id or new_id("USR"),
                 "name": clean(data.get("name")),
                 "email": clean(data.get("email")),
-                "role": clean(data.get("role")) or "测试工程师",
-                "department": clean(data.get("department")),
+                "role": clean(data.get("role")) or "测试",
                 "phone": clean(data.get("phone")),
                 "status": clean(data.get("status")) or "启用",
                 "last_login": clean(data.get("last_login")),
@@ -653,6 +681,7 @@ class AppHandler(BaseHTTPRequestHandler):
                 "id": record_id or new_id("ROLE"),
                 "name": clean(data.get("name")),
                 "description": clean(data.get("description")),
+                "permissions": normalize_permissions(data.get("permissions")),
                 "status": clean(data.get("status")) or "启用",
                 "created_at": clean(data.get("created_at")) or timestamp,
                 "updated_at": timestamp,
@@ -749,6 +778,19 @@ def optional_id(value: object) -> str | None:
     return text or None
 
 
+def normalize_permissions(value: object) -> str:
+    if isinstance(value, list):
+        permissions = [clean(item) for item in value if clean(item)]
+    else:
+        try:
+            parsed = json.loads(clean(value) or "[]")
+            permissions = [clean(item) for item in parsed if clean(item)] if isinstance(parsed, list) else []
+        except json.JSONDecodeError:
+            permissions = []
+    unique_permissions = list(dict.fromkeys(permissions))
+    return json.dumps(unique_permissions, ensure_ascii=False)
+
+
 def hash_password(password: str) -> tuple[str, str]:
     salt = secrets.token_hex(16)
     password_hash = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt.encode("utf-8"), 120_000)
@@ -777,7 +819,7 @@ def public_user(user: sqlite3.Row | None) -> dict | None:
         "name": user["name"],
         "email": user["email"],
         "role": user["role"],
-        "department": user["department"],
+        "role_permissions": user["role_permissions"] if "role_permissions" in user.keys() else "[]",
         "status": user["status"],
         "last_login": user["last_login"],
     }

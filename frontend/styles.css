@@ -420,6 +420,41 @@ tr:last-child td {
   color: var(--danger);
 }
 
+.permission-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  min-width: 180px;
+}
+
+.permission-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
+  gap: 10px;
+}
+
+.checkbox-field {
+  display: flex !important;
+  align-items: center;
+  gap: 8px;
+  min-height: 38px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 8px 10px;
+  background: #f8fafc;
+  color: var(--text) !important;
+  font-size: 13px;
+}
+
+.checkbox-field input {
+  width: auto;
+}
+
+.muted-text {
+  color: var(--muted);
+  white-space: nowrap;
+}
+
 .actions {
   display: flex;
   gap: 8px;

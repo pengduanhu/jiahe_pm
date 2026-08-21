@@ -10,6 +10,14 @@ const state = {
   search: "",
 };
 
+const permissionOptions = [
+  { value: "requirements", label: "需求管理" },
+  { value: "plans", label: "测试计划" },
+  { value: "cases", label: "测试用例" },
+  { value: "users", label: "用户管理" },
+  { value: "roles", label: "角色管理" },
+];
+
 const viewMeta = {
   dashboard: {
     title: "工作台",
@@ -36,13 +44,13 @@ const viewMeta = {
   },
   users: {
     title: "用户管理",
-    subtitle: "维护团队成员、角色、部门和账号状态。",
+    subtitle: "维护团队成员、绑定角色和账号状态。",
     action: "新建用户",
-    search: "搜索姓名、邮箱、角色、部门",
+    search: "搜索姓名、邮箱、角色、电话",
   },
   roles: {
     title: "角色管理",
-    subtitle: "维护系统角色、职责说明和启停状态。",
+    subtitle: "维护系统角色、权限范围和启停状态。",
     action: "新建角色",
     search: "搜索角色名称、描述、状态",
   },
@@ -84,7 +92,6 @@ const schemas = {
     { name: "name", label: "姓名", type: "text", required: true },
     { name: "email", label: "邮箱", type: "email" },
     { name: "role", label: "角色", type: "role" },
-    { name: "department", label: "部门", type: "text" },
     { name: "phone", label: "电话", type: "tel" },
     { name: "status", label: "状态", type: "select", options: ["启用", "停用"] },
     { name: "last_login", label: "最近登录", type: "date" },
@@ -92,6 +99,7 @@ const schemas = {
   role: [
     { name: "name", label: "角色名称", type: "text", required: true },
     { name: "status", label: "状态", type: "select", options: ["启用", "停用"] },
+    { name: "permissions", label: "权限", type: "permissions", full: true },
     { name: "description", label: "职责描述", type: "textarea", full: true },
   ],
 };
@@ -144,6 +152,9 @@ function bindEvents() {
     const type = form.dataset.type;
     const id = form.dataset.id;
     const payload = Object.fromEntries(new FormData(form).entries());
+    if (type === "role") {
+      payload.permissions = new FormData(form).getAll("permissions");
+    }
     const saved = await saveRecord(type, id, payload);
     if (saved) {
       closeDialog();
@@ -357,13 +368,13 @@ function renderDashboard() {
   document.getElementById("recent-users").innerHTML = state.users
     .filter((item) => item.status === "启用")
     .slice(0, 5)
-    .map((item) => compactItem(item.name, `${item.role || "未设置角色"} · ${item.department || "未设置部门"}`))
+    .map((item) => compactItem(item.name, `${item.role || "未设置角色"} · ${permissionSummary(item.role_permissions)}`))
     .join("") || emptyState("暂无启用用户");
 
   document.getElementById("recent-roles").innerHTML = state.roles
     .filter((item) => item.status === "启用")
     .slice(0, 7)
-    .map((item) => compactItem(item.name, `${item.user_count || 0} 个用户 · ${item.description || "未填写职责"}`))
+    .map((item) => compactItem(item.name, `${item.user_count || 0} 个用户 · ${permissionSummary(item.permissions)}`))
     .join("") || emptyState("暂无启用角色");
 }
 
@@ -416,14 +427,14 @@ function renderCases() {
 }
 
 function renderUsers() {
-  const rows = filterRows(state.users, ["name", "email", "role", "department", "phone", "status"]);
+  const rows = filterRows(state.users, ["name", "email", "role", "phone", "status"]);
   document.getElementById("users-table").innerHTML = rows.map((item) => `
     <tr>
       <td>${escapeHtml(item.id)}</td>
       <td class="title-cell">${escapeHtml(item.name)}</td>
       <td>${escapeHtml(item.email || "-")}</td>
       <td>${escapeHtml(item.role || "-")}</td>
-      <td>${escapeHtml(item.department || "-")}</td>
+      <td>${permissionBadges(item.role_permissions)}</td>
       <td>${escapeHtml(item.phone || "-")}</td>
       <td>${badge(item.status)}</td>
       <td>${escapeHtml(item.last_login || "-")}</td>
@@ -433,17 +444,18 @@ function renderUsers() {
 }
 
 function renderRoles() {
-  const rows = filterRows(state.roles, ["name", "description", "status"]);
+  const rows = filterRows(state.roles, ["name", "description", "status", "permissions"]);
   document.getElementById("roles-table").innerHTML = rows.map((item) => `
     <tr>
       <td>${escapeHtml(item.id)}</td>
       <td class="title-cell">${escapeHtml(item.name)}</td>
       <td>${escapeHtml(item.description || "-")}</td>
+      <td>${permissionBadges(item.permissions)}</td>
       <td>${badge(item.status)}</td>
       <td>${escapeHtml(item.user_count ?? 0)}</td>
       <td>${actions("role", item.id)}</td>
     </tr>
-  `).join("") || tableEmpty(6);
+  `).join("") || tableEmpty(7);
 }
 
 function openEditor(type, item = null) {
@@ -474,6 +486,8 @@ function fieldHtml(field, item) {
     control = relationSelect(field.name, value, state.plans, "name", "不关联计划");
   } else if (field.type === "role") {
     control = roleSelect(field.name, value);
+  } else if (field.type === "permissions") {
+    control = permissionCheckboxes(value);
   } else {
     control = `<input name="${field.name}" type="${field.type}" value="${escapeHtml(value)}" ${required} />`;
   }
@@ -497,6 +511,18 @@ function roleSelect(name, value) {
     <option value="">不设置角色</option>
     ${options.map((item) => `<option value="${escapeHtml(item.name)}" ${value === item.name ? "selected" : ""}>${escapeHtml(item.name)}</option>`).join("")}
   </select>`;
+}
+
+function permissionCheckboxes(value) {
+  const selected = new Set(parsePermissions(value));
+  return `<div class="permission-grid">
+    ${permissionOptions.map((item) => `
+      <label class="checkbox-field">
+        <input type="checkbox" name="permissions" value="${escapeHtml(item.value)}" ${selected.has(item.value) ? "checked" : ""} />
+        <span>${escapeHtml(item.label)}</span>
+      </label>
+    `).join("")}
+  </div>`;
 }
 
 function actions(type, id) {
@@ -540,6 +566,34 @@ function emptyState(text) {
 
 function tableEmpty(columns) {
   return `<tr><td colspan="${columns}" class="empty-state">暂无数据</td></tr>`;
+}
+
+function parsePermissions(value) {
+  if (Array.isArray(value)) return value;
+  try {
+    const parsed = JSON.parse(value || "[]");
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+function permissionLabel(value) {
+  return permissionOptions.find((item) => item.value === value)?.label || value;
+}
+
+function permissionSummary(value) {
+  const permissions = parsePermissions(value);
+  if (!permissions.length) return "暂无权限";
+  return permissions.map(permissionLabel).join("、");
+}
+
+function permissionBadges(value) {
+  const permissions = parsePermissions(value);
+  if (!permissions.length) return `<span class="muted-text">暂无权限</span>`;
+  return `<div class="permission-list">${permissions.map((item) => (
+    `<span class="badge">${escapeHtml(permissionLabel(item))}</span>`
+  )).join("")}</div>`;
 }
 
 function typeLabel(type) {

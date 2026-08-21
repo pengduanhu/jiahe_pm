@@ -1,0 +1,199 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>项目协作与测试管理</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <aside class="sidebar">
+      <div class="brand">
+        <span class="brand-mark">PM</span>
+        <div>
+          <strong>项目测试平台</strong>
+          <small>MVP 工作台</small>
+        </div>
+      </div>
+      <nav class="nav">
+        <button class="nav-item active" data-view="dashboard">工作台</button>
+        <button class="nav-item" data-view="requirements">需求管理</button>
+        <button class="nav-item" data-view="plans">测试计划</button>
+        <button class="nav-item" data-view="cases">测试用例</button>
+        <button class="nav-item" data-view="users">用户管理</button>
+        <button class="nav-item" data-view="roles">角色管理</button>
+      </nav>
+    </aside>
+
+    <main class="main">
+      <header class="topbar">
+        <div>
+          <h1 id="page-title">工作台</h1>
+          <p id="page-subtitle">查看需求、计划、用例的整体状态。</p>
+        </div>
+        <div class="topbar-actions">
+          <input id="search-input" type="search" placeholder="搜索标题、负责人、状态" />
+          <button id="primary-action" class="primary">新建需求</button>
+        </div>
+      </header>
+
+      <section id="dashboard-view" class="view active">
+        <div class="metrics">
+          <article>
+            <span>需求总数</span>
+            <strong id="metric-requirements">0</strong>
+          </article>
+          <article>
+            <span>测试计划</span>
+            <strong id="metric-plans">0</strong>
+          </article>
+          <article>
+            <span>测试用例</span>
+            <strong id="metric-cases">0</strong>
+          </article>
+          <article>
+            <span>启用用户</span>
+            <strong id="metric-users">0</strong>
+          </article>
+          <article>
+            <span>启用角色</span>
+            <strong id="metric-roles">0</strong>
+          </article>
+        </div>
+        <div class="dashboard-grid">
+          <section>
+            <h2>最近需求</h2>
+            <div id="recent-requirements" class="compact-list"></div>
+          </section>
+          <section>
+            <h2>待执行用例</h2>
+            <div id="recent-cases" class="compact-list"></div>
+          </section>
+          <section>
+            <h2>团队成员</h2>
+            <div id="recent-users" class="compact-list"></div>
+          </section>
+          <section>
+            <h2>角色清单</h2>
+            <div id="recent-roles" class="compact-list"></div>
+          </section>
+        </div>
+      </section>
+
+      <section id="requirements-view" class="view">
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>编号</th>
+                <th>需求标题</th>
+                <th>负责人</th>
+                <th>优先级</th>
+                <th>状态</th>
+                <th>截止日期</th>
+                <th>操作</th>
+              </tr>
+            </thead>
+            <tbody id="requirements-table"></tbody>
+          </table>
+        </div>
+      </section>
+
+      <section id="plans-view" class="view">
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>编号</th>
+                <th>计划名称</th>
+                <th>关联需求</th>
+                <th>负责人</th>
+                <th>环境</th>
+                <th>周期</th>
+                <th>状态</th>
+                <th>操作</th>
+              </tr>
+            </thead>
+            <tbody id="plans-table"></tbody>
+          </table>
+        </div>
+      </section>
+
+      <section id="cases-view" class="view">
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>编号</th>
+                <th>用例标题</th>
+                <th>模块</th>
+                <th>关联需求</th>
+                <th>测试计划</th>
+                <th>优先级</th>
+                <th>状态</th>
+                <th>负责人</th>
+                <th>操作</th>
+              </tr>
+            </thead>
+            <tbody id="cases-table"></tbody>
+          </table>
+        </div>
+      </section>
+
+      <section id="users-view" class="view">
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>编号</th>
+                <th>姓名</th>
+                <th>邮箱</th>
+                <th>角色</th>
+                <th>部门</th>
+                <th>电话</th>
+                <th>状态</th>
+                <th>最近登录</th>
+                <th>操作</th>
+              </tr>
+            </thead>
+            <tbody id="users-table"></tbody>
+          </table>
+        </div>
+      </section>
+
+      <section id="roles-view" class="view">
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>编号</th>
+                <th>角色名称</th>
+                <th>描述</th>
+                <th>状态</th>
+                <th>用户数</th>
+                <th>操作</th>
+              </tr>
+            </thead>
+            <tbody id="roles-table"></tbody>
+          </table>
+        </div>
+      </section>
+    </main>
+
+    <dialog id="editor-dialog">
+      <form id="editor-form" method="dialog">
+        <header class="dialog-header">
+          <h2 id="dialog-title">新建</h2>
+          <button type="button" id="close-dialog" class="icon-button" aria-label="关闭">×</button>
+        </header>
+        <div id="form-fields" class="form-grid"></div>
+        <footer class="dialog-footer">
+          <button type="button" id="cancel-dialog">取消</button>
+          <button type="submit" class="primary">保存</button>
+        </footer>
+      </form>
+    </dialog>
+
+    <script src="/app.js"></script>
+  </body>
+</html>

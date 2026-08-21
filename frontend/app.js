@@ -1,5 +1,7 @@
 const state = {
   view: "dashboard",
+  token: localStorage.getItem("auth_token") || "",
+  currentUser: null,
   requirements: [],
   plans: [],
   cases: [],
@@ -104,10 +106,16 @@ const endpoints = {
 
 document.addEventListener("DOMContentLoaded", () => {
   bindEvents();
-  loadAll();
+  restoreSession();
 });
 
 function bindEvents() {
+  document.getElementById("login-tab").addEventListener("click", () => switchAuthMode("login"));
+  document.getElementById("register-tab").addEventListener("click", () => switchAuthMode("register"));
+  document.getElementById("login-form").addEventListener("submit", handleLogin);
+  document.getElementById("register-form").addEventListener("submit", handleRegister);
+  document.getElementById("logout-button").addEventListener("click", logout);
+
   document.querySelectorAll(".nav-item").forEach((button) => {
     button.addEventListener("click", () => {
       switchView(button.dataset.view);
@@ -144,6 +152,92 @@ function bindEvents() {
   });
 }
 
+async function restoreSession() {
+  if (!state.token) {
+    showAuth();
+    return;
+  }
+  try {
+    const result = await apiGet("/api/auth/me");
+    state.currentUser = result.user;
+    await enterApp();
+  } catch (error) {
+    clearSession();
+    showAuth();
+  }
+}
+
+function switchAuthMode(mode) {
+  const isLogin = mode === "login";
+  document.getElementById("login-tab").classList.toggle("active", isLogin);
+  document.getElementById("register-tab").classList.toggle("active", !isLogin);
+  document.getElementById("login-form").classList.toggle("hidden", !isLogin);
+  document.getElementById("register-form").classList.toggle("hidden", isLogin);
+  setAuthMessage("");
+}
+
+async function handleLogin(event) {
+  event.preventDefault();
+  const payload = Object.fromEntries(new FormData(event.currentTarget).entries());
+  await authenticate("/api/auth/login", payload);
+}
+
+async function handleRegister(event) {
+  event.preventDefault();
+  const payload = Object.fromEntries(new FormData(event.currentTarget).entries());
+  await authenticate("/api/auth/register", payload);
+}
+
+async function authenticate(path, payload) {
+  setAuthMessage("");
+  try {
+    const result = await apiPost(path, payload, false);
+    state.token = result.token;
+    state.currentUser = result.user;
+    localStorage.setItem("auth_token", state.token);
+    await enterApp();
+  } catch (error) {
+    setAuthMessage(error.message || "操作失败，请稍后重试");
+  }
+}
+
+async function enterApp() {
+  showApp();
+  document.getElementById("current-user").textContent = state.currentUser
+    ? `${state.currentUser.name} · ${state.currentUser.role || "未设置角色"}`
+    : "";
+  await loadAll();
+}
+
+async function logout() {
+  try {
+    await fetch("/api/auth/logout", { method: "DELETE", headers: authHeaders() });
+  } finally {
+    clearSession();
+    showAuth();
+  }
+}
+
+function showAuth() {
+  document.getElementById("auth-screen").hidden = false;
+  document.getElementById("app-shell").hidden = true;
+}
+
+function showApp() {
+  document.getElementById("auth-screen").hidden = true;
+  document.getElementById("app-shell").hidden = false;
+}
+
+function clearSession() {
+  state.token = "";
+  state.currentUser = null;
+  localStorage.removeItem("auth_token");
+}
+
+function setAuthMessage(message) {
+  document.getElementById("auth-message").textContent = message;
+}
+
 async function loadAll() {
   const [summary, requirements, plans, cases, users, roles] = await Promise.all([
     apiGet("/api/summary"),
@@ -163,19 +257,29 @@ async function loadAll() {
 }
 
 async function apiGet(path) {
-  const response = await fetch(path);
-  if (!response.ok) throw new Error(await response.text());
+  const response = await fetch(path, { headers: authHeaders() });
+  if (!response.ok) throw new Error(await errorMessage(response));
+  return response.json();
+}
+
+async function apiPost(path, payload, withAuth = true) {
+  const response = await fetch(path, {
+    method: "POST",
+    headers: withAuth ? authHeaders({ "Content-Type": "application/json" }) : { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  if (!response.ok) throw new Error(await errorMessage(response));
   return response.json();
 }
 
 async function saveRecord(type, id, payload) {
   const response = await fetch(id ? `${endpoints[type]}/${id}` : endpoints[type], {
     method: id ? "PUT" : "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: authHeaders({ "Content-Type": "application/json" }),
     body: JSON.stringify(payload),
   });
   if (!response.ok) {
-    alert(`保存失败：${await response.text()}`);
+    alert(`保存失败：${await errorMessage(response)}`);
     return false;
   }
   return true;
@@ -183,12 +287,26 @@ async function saveRecord(type, id, payload) {
 
 async function deleteRecord(type, id) {
   if (!confirm("确定删除这条记录吗？")) return;
-  const response = await fetch(`${endpoints[type]}/${id}`, { method: "DELETE" });
+  const response = await fetch(`${endpoints[type]}/${id}`, { method: "DELETE", headers: authHeaders() });
   if (!response.ok) {
-    alert(`删除失败：${await response.text()}`);
+    alert(`删除失败：${await errorMessage(response)}`);
     return;
   }
   await loadAll();
+}
+
+function authHeaders(extra = {}) {
+  return state.token ? { ...extra, Authorization: `Bearer ${state.token}` } : extra;
+}
+
+async function errorMessage(response) {
+  const text = await response.text();
+  try {
+    const data = JSON.parse(text);
+    return data.error || text;
+  } catch {
+    return text || response.statusText;
+  }
 }
 
 function switchView(view) {

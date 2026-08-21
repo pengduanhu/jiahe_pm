@@ -2,7 +2,10 @@
 from __future__ import annotations
 
 import json
+import hashlib
+import hmac
 import os
+import secrets
 import sqlite3
 import uuid
 from datetime import datetime, timezone
@@ -101,6 +104,8 @@ def init_db() -> None:
                 phone TEXT NOT NULL DEFAULT '',
                 status TEXT NOT NULL DEFAULT '启用',
                 last_login TEXT NOT NULL DEFAULT '',
+                password_salt TEXT,
+                password_hash TEXT,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
             );
@@ -113,8 +118,16 @@ def init_db() -> None:
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
             );
+
+            CREATE TABLE IF NOT EXISTS auth_sessions (
+                token TEXT PRIMARY KEY,
+                user_id TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+            );
             """
         )
+        ensure_user_auth_columns(conn)
 
         existing = conn.execute("SELECT COUNT(*) AS count FROM requirements").fetchone()["count"]
         if existing == 0:
@@ -128,6 +141,15 @@ def init_db() -> None:
         if existing_users == 0:
             seed_users(conn)
         normalize_user_roles(conn)
+        seed_default_admin_password(conn)
+
+
+def ensure_user_auth_columns(conn: sqlite3.Connection) -> None:
+    columns = {row["name"] for row in conn.execute("PRAGMA table_info(users)").fetchall()}
+    if "password_salt" not in columns:
+        conn.execute("ALTER TABLE users ADD COLUMN password_salt TEXT")
+    if "password_hash" not in columns:
+        conn.execute("ALTER TABLE users ADD COLUMN password_hash TEXT")
 
 
 def seed_data(conn: sqlite3.Connection) -> None:
@@ -221,6 +243,20 @@ def normalize_user_roles(conn: sqlite3.Connection) -> None:
     conn.execute("UPDATE users SET role = '测试' WHERE role IN ('测试负责人', '测试工程师')")
 
 
+def seed_default_admin_password(conn: sqlite3.Connection) -> None:
+    admin = conn.execute(
+        "SELECT id, password_hash FROM users WHERE email = ? LIMIT 1",
+        ("admin@example.com",),
+    ).fetchone()
+    if not admin or admin["password_hash"]:
+        return
+    salt, password_hash = hash_password(os.environ.get("ADMIN_PASSWORD", "admin123456"))
+    conn.execute(
+        "UPDATE users SET password_salt = ?, password_hash = ? WHERE id = ?",
+        (salt, password_hash, admin["id"]),
+    )
+
+
 def seed_roles(conn: sqlite3.Connection) -> None:
     created = now_iso()
     roles = [
@@ -262,6 +298,10 @@ class AppHandler(BaseHTTPRequestHandler):
         self.serve_static(parsed.path, include_body=False)
 
     def do_POST(self) -> None:
+        parsed = urlparse(self.path)
+        if parsed.path.startswith("/api/auth/"):
+            self.handle_auth_post(parsed.path)
+            return
         self.handle_mutation("POST")
 
     def do_PUT(self) -> None:
@@ -269,6 +309,11 @@ class AppHandler(BaseHTTPRequestHandler):
 
     def do_DELETE(self) -> None:
         parsed = urlparse(self.path)
+        if parsed.path == "/api/auth/logout":
+            self.handle_logout()
+            return
+        if not self.require_auth():
+            return
         parts = [part for part in parsed.path.split("/") if part]
         if len(parts) == 3 and parts[0] == "api":
             table = self.table_for(parts[1])
@@ -318,6 +363,15 @@ class AppHandler(BaseHTTPRequestHandler):
             self.wfile.write(body)
 
     def handle_api_get(self, path: str, query: dict[str, list[str]]) -> None:
+        if path == "/api/auth/me":
+            user = self.require_auth()
+            if user:
+                self.send_json({"user": public_user(user)})
+            return
+
+        if not self.require_auth():
+            return
+
         if path == "/api/summary":
             self.send_json(self.summary())
             return
@@ -364,7 +418,7 @@ class AppHandler(BaseHTTPRequestHandler):
             elif table == "users":
                 rows = conn.execute(
                     """
-                    SELECT *
+                    SELECT id, name, email, role, department, phone, status, last_login, created_at, updated_at
                     FROM users
                     WHERE (? = '' OR name LIKE ? OR email LIKE ? OR role LIKE ? OR department LIKE ? OR status LIKE ?)
                     ORDER BY updated_at DESC
@@ -386,6 +440,9 @@ class AppHandler(BaseHTTPRequestHandler):
         self.send_json(rows_to_list(rows))
 
     def handle_mutation(self, method: str) -> None:
+        if not self.require_auth():
+            return
+
         parsed = urlparse(self.path)
         parts = [part for part in parsed.path.split("/") if part]
         if len(parts) not in (2, 3) or parts[0] != "api":
@@ -412,6 +469,109 @@ class AppHandler(BaseHTTPRequestHandler):
 
         self.send_error_json(405, "Method not allowed")
 
+    def handle_auth_post(self, path: str) -> None:
+        if path == "/api/auth/register":
+            self.register()
+            return
+        if path == "/api/auth/login":
+            self.login()
+            return
+        self.send_error_json(404, "Not found")
+
+    def register(self) -> None:
+        data = self.read_json()
+        if data is None:
+            return
+
+        name = clean(data.get("name"))
+        email = clean(data.get("email")).lower()
+        password = str(data.get("password") or "")
+        if not name or not email or not password:
+            self.send_error_json(400, "Name, email and password are required")
+            return
+        if len(password) < 6:
+            self.send_error_json(400, "Password must be at least 6 characters")
+            return
+
+        timestamp = now_iso()
+        user_id = new_id("USR")
+        salt, password_hash = hash_password(password)
+        with connect() as conn:
+            existing = conn.execute("SELECT id FROM users WHERE lower(email) = ?", (email,)).fetchone()
+            if existing:
+                self.send_error_json(409, "Email is already registered")
+                return
+            conn.execute(
+                """
+                INSERT INTO users
+                (id, name, email, role, department, phone, status, last_login, password_salt, password_hash, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (user_id, name, email, "测试", "", "", "启用", datetime.now().date().isoformat(), salt, password_hash, timestamp, timestamp),
+            )
+            token = create_session(conn, user_id)
+            user = conn.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
+        self.send_json({"token": token, "user": public_user(user)}, status=201)
+
+    def login(self) -> None:
+        data = self.read_json()
+        if data is None:
+            return
+
+        email = clean(data.get("email")).lower()
+        password = str(data.get("password") or "")
+        with connect() as conn:
+            user = conn.execute(
+                "SELECT * FROM users WHERE lower(email) = ? AND status = '启用'",
+                (email,),
+            ).fetchone()
+            if not user or not user["password_salt"] or not user["password_hash"]:
+                self.send_error_json(401, "Invalid email or password")
+                return
+            if not verify_password(password, user["password_salt"], user["password_hash"]):
+                self.send_error_json(401, "Invalid email or password")
+                return
+            conn.execute(
+                "UPDATE users SET last_login = ?, updated_at = ? WHERE id = ?",
+                (datetime.now().date().isoformat(), now_iso(), user["id"]),
+            )
+            token = create_session(conn, user["id"])
+            user = conn.execute("SELECT * FROM users WHERE id = ?", (user["id"],)).fetchone()
+        self.send_json({"token": token, "user": public_user(user)})
+
+    def handle_logout(self) -> None:
+        token = self.auth_token()
+        if token:
+            with connect() as conn:
+                conn.execute("DELETE FROM auth_sessions WHERE token = ?", (token,))
+        self.send_json({"ok": True})
+
+    def auth_token(self) -> str:
+        header = self.headers.get("Authorization", "")
+        if header.startswith("Bearer "):
+            return header.removeprefix("Bearer ").strip()
+        return self.headers.get("X-Auth-Token", "").strip()
+
+    def require_auth(self) -> sqlite3.Row | None:
+        token = self.auth_token()
+        if not token:
+            self.send_error_json(401, "Authentication required")
+            return None
+        with connect() as conn:
+            user = conn.execute(
+                """
+                SELECT u.*
+                FROM auth_sessions s
+                JOIN users u ON u.id = s.user_id
+                WHERE s.token = ? AND u.status = '启用'
+                """,
+                (token,),
+            ).fetchone()
+        if not user:
+            self.send_error_json(401, "Authentication required")
+            return None
+        return user
+
     def create_record(self, table: str, data: dict) -> None:
         record = self.normalize_record(table, data, record_id=None)
         columns = list(record.keys())
@@ -426,7 +586,7 @@ class AppHandler(BaseHTTPRequestHandler):
                 self.send_error_json(409, "Record conflicts with existing data")
                 return
             saved = conn.execute(f"SELECT * FROM {table} WHERE id = ?", (record["id"],)).fetchone()
-        self.send_json(row_to_dict(saved), status=201)
+        self.send_json(record_response(table, saved), status=201)
 
     def update_record(self, table: str, record_id: str, data: dict) -> None:
         with connect() as conn:
@@ -445,7 +605,7 @@ class AppHandler(BaseHTTPRequestHandler):
                 self.send_error_json(409, "Record conflicts with existing data")
                 return
             saved = conn.execute(f"SELECT * FROM {table} WHERE id = ?", (record_id,)).fetchone()
-        self.send_json(row_to_dict(saved))
+        self.send_json(record_response(table, saved))
 
     def normalize_record(self, table: str, data: dict, record_id: str | None) -> dict:
         timestamp = now_iso()
@@ -587,6 +747,46 @@ def clean(value: object) -> str:
 def optional_id(value: object) -> str | None:
     text = clean(value)
     return text or None
+
+
+def hash_password(password: str) -> tuple[str, str]:
+    salt = secrets.token_hex(16)
+    password_hash = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt.encode("utf-8"), 120_000)
+    return salt, password_hash.hex()
+
+
+def verify_password(password: str, salt: str, expected_hash: str) -> bool:
+    actual_hash = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt.encode("utf-8"), 120_000).hex()
+    return hmac.compare_digest(actual_hash, expected_hash)
+
+
+def create_session(conn: sqlite3.Connection, user_id: str) -> str:
+    token = secrets.token_urlsafe(32)
+    conn.execute(
+        "INSERT INTO auth_sessions (token, user_id, created_at) VALUES (?, ?, ?)",
+        (token, user_id, now_iso()),
+    )
+    return token
+
+
+def public_user(user: sqlite3.Row | None) -> dict | None:
+    if not user:
+        return None
+    return {
+        "id": user["id"],
+        "name": user["name"],
+        "email": user["email"],
+        "role": user["role"],
+        "department": user["department"],
+        "status": user["status"],
+        "last_login": user["last_login"],
+    }
+
+
+def record_response(table: str, row: sqlite3.Row | None) -> dict | None:
+    if table == "users":
+        return public_user(row)
+    return row_to_dict(row)
 
 
 def main() -> None:
